@@ -1,10 +1,10 @@
-const textract = require('textract');
 const mammoth = require('mammoth');
 const fs = require('fs-extra');
 const path = require('path');
 const mime = require('mime');
 const { table } = require('table');
 const markdownTable = require('markdown-table');
+const PDFProcessor = require('./pdf-processor');
 
 class DocumentProcessor {
   constructor(options = {}) {
@@ -15,6 +15,9 @@ class DocumentProcessor {
       outputFormat: 'enhanced-text', // 'text', 'markdown', 'json', 'enhanced-text'
       ...options
     };
+    
+    // Initialize PDF processor
+    this.pdfProcessor = new PDFProcessor(this.options);
   }
 
   async processDocument(filePath) {
@@ -30,7 +33,7 @@ class DocumentProcessor {
         extractedText: '',
         tables: [],
         metadata: {},
-        processingMethod: 'textract'
+        processingMethod: 'enhanced-javascript'
       };
 
       // Choose processing method based on file type
@@ -41,12 +44,12 @@ class DocumentProcessor {
         case '.pdf':
           result = await this.processPdf(filePath, result);
           break;
-        case '.xlsx':
-        case '.xls':
-          result = await this.processSpreadsheet(filePath, result);
+        case '.txt':
+        case '.md':
+          result = await this.processText(filePath, result);
           break;
         default:
-          result = await this.processGeneric(filePath, result);
+          throw new Error(`Unsupported file type: ${fileExtension}. Supported types: .pdf, .docx, .txt, .md`);
       }
 
       // Post-process to enhance for Claude
@@ -85,35 +88,29 @@ class DocumentProcessor {
         result.tables = this.extractTablesFromHtml(mammothResult.value);
       }
 
-      // Fallback to textract for plain text
-      const textractText = await this.textractExtract(filePath);
-      result.fallbackText = textractText;
+      // Also get plain text version
+      const plainTextResult = await mammoth.extractRawText(buffer);
+      result.plainText = plainTextResult.value;
 
       return result;
     } catch (error) {
-      console.warn('Mammoth failed, falling back to textract:', error.message);
-      return await this.processGeneric(filePath, result);
+      console.error('DOCX processing failed:', error);
+      throw error;
     }
   }
 
   async processPdf(filePath, result) {
     try {
-      // Use textract with PDF-specific options
-      const text = await this.textractExtract(filePath, {
-        pdftotextOptions: {
-          layout: 'raw', // Preserve layout for table detection
-          bbox: true,    // Include bounding box info
-          nopgbrk: true  // No page breaks
-        }
-      });
-
-      result.extractedText = text;
-      result.processingMethod = 'textract-pdf';
-
-      // Detect and extract tables from raw text
-      if (this.options.extractTables) {
-        result.tables = this.detectTablesInText(text);
+      // Use our pure JavaScript PDF processor
+      const pdfResult = await this.pdfProcessor.processDocument(filePath);
+      
+      if (!pdfResult.success) {
+        throw new Error(pdfResult.error || 'PDF processing failed');
       }
+
+      result.extractedText = pdfResult.claudeReady;
+      result.metadata = pdfResult.metadata;
+      result.processingMethod = 'pdf-parse-js';
 
       return result;
     } catch (error) {
@@ -122,47 +119,22 @@ class DocumentProcessor {
     }
   }
 
-  async processSpreadsheet(filePath, result) {
+  async processText(filePath, result) {
     try {
-      const text = await this.textractExtract(filePath);
+      const text = await fs.readFile(filePath, 'utf8');
       result.extractedText = text;
-      result.processingMethod = 'textract-spreadsheet';
+      result.processingMethod = 'text-reader';
 
-      // For spreadsheets, the entire content is essentially a table
+      // Detect tables in plain text if enabled
       if (this.options.extractTables) {
-        result.tables = this.parseSpreadsheetText(text);
+        result.tables = this.detectTablesInText(text);
       }
 
       return result;
     } catch (error) {
-      console.error('Spreadsheet processing failed:', error);
+      console.error('Text processing failed:', error);
       throw error;
     }
-  }
-
-  async processGeneric(filePath, result) {
-    const text = await this.textractExtract(filePath);
-    result.extractedText = text;
-    result.processingMethod = 'textract-generic';
-    return result;
-  }
-
-  async textractExtract(filePath, options = {}) {
-    return new Promise((resolve, reject) => {
-      const extractOptions = {
-        preserveLineBreaks: this.options.preserveLineBreaks,
-        preserveOnlyMultipleLineBreaks: this.options.preserveOnlyMultipleLineBreaks,
-        ...options
-      };
-
-      textract.fromFileWithPath(filePath, extractOptions, (error, text) => {
-        if (error) {
-          reject(error);
-        } else {
-          resolve(text || '');
-        }
-      });
-    });
   }
 
   extractTablesFromHtml(htmlContent) {
@@ -197,7 +169,7 @@ class DocumentProcessor {
   }
 
   detectTablesInText(text) {
-    // Simple table detection for PDF text
+    // Simple table detection for plain text
     const lines = text.split('\n');
     const tables = [];
     let currentTable = [];
@@ -249,21 +221,6 @@ class DocumentProcessor {
     return tables;
   }
 
-  parseSpreadsheetText(text) {
-    // For spreadsheet text, split by commas and newlines
-    const lines = text.split('\n').filter(line => line.trim());
-    const table = lines.map(line => 
-      line.split(',').map(cell => cell.trim().replace(/^"|"$/g, ''))
-    );
-
-    return [{
-      index: 1,
-      rows: table.length,
-      columns: Math.max(...table.map(row => row.length)),
-      data: table
-    }];
-  }
-
   formatForClaude(result) {
     let output = '';
 
@@ -271,7 +228,13 @@ class DocumentProcessor {
     output += `## Document Analysis\n`;
     output += `**File:** ${path.basename(result.originalPath)}\n`;
     output += `**Type:** ${result.mimeType}\n`;
-    output += `**Processing Method:** ${result.processingMethod}\n\n`;
+    output += `**Processing Method:** ${result.processingMethod}\n`;
+    
+    if (result.metadata?.pages) {
+      output += `**Pages:** ${result.metadata.pages}\n`;
+    }
+    
+    output += `\n---\n\n`;
 
     // Add tables in readable format
     if (result.tables && result.tables.length > 0) {
@@ -283,7 +246,7 @@ class DocumentProcessor {
         if (this.options.outputFormat === 'markdown') {
           output += markdownTable(table.data) + '\n\n';
         } else {
-          // Enhanced text format
+          // Enhanced text format with nice borders
           const config = {
             border: {
               topBody: '─',
@@ -316,7 +279,9 @@ class DocumentProcessor {
 
     // Add extracted text
     if (result.extractedText) {
-      output += `## Document Content\n\n`;
+      if (result.tables && result.tables.length > 0) {
+        output += `## Document Content\n\n`;
+      }
       output += result.extractedText;
     }
 
@@ -358,8 +323,8 @@ class DocumentProcessor {
       const jsonPath = path.join(outputDir, `${baseName}_data.json`);
       await fs.writeFile(jsonPath, JSON.stringify(result, null, 2));
 
-      console.log(`Saved: ${textPath}`);
-      console.log(`Saved: ${jsonPath}`);
+      console.log(`✅ Saved: ${textPath}`);
+      console.log(`📊 Saved: ${jsonPath}`);
     }
   }
 }
