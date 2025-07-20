@@ -1,21 +1,16 @@
 {
   "name": "claude-document-enhancer",
-  "version": "1.0.0",
-  "description": "Enhanced document processing pipeline for Claude - converts PDFs and DOCX with tables into Claude-friendly formats",
+  "version": "2.0.0",
+  "description": "Enhanced document processing pipeline for Claude - converts PDFs and DOCX with tables into Claude-friendly formats using pure JavaScript (no external dependencies)",
   "main": "src/processor.js",
   "scripts": {
     "start": "node src/processor.js",
     "test": "node test/test-documents.js",
-    "setup": "node scripts/setup-dependencies.js",
     "process": "node src/cli.js"
   },
   "dependencies": {
-    "textract": "^2.5.0",
+    "pdf-parse": "^1.1.1",
     "mammoth": "^1.6.0",
-    "pdf-text-extract": "^1.5.0",
-    "pdf2pic": "^2.1.4",
-    "tesseract.js": "^5.0.0",
-    "xlsx": "^0.18.5",
     "cheerio": "^1.0.0-rc.12",
     "commander": "^11.0.0",
     "chalk": "^4.1.2",
@@ -34,8 +29,10 @@
     "pdf",
     "docx",
     "table-extraction",
-    "textract",
-    "mammoth"
+    "pdf-parse",
+    "mammoth",
+    "javascript",
+    "no-dependencies"
   ],
   "author": "Claude Document Enhancer",
   "license": "MIT",
